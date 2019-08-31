@@ -41,8 +41,8 @@ class Smartbridge:
         self._monitor_task = self._loop.create_task(self._monitor())
 
     @classmethod
-    def create_tls(cls, hostname, keyfile, certfile, ca_certs, port=LEAP_PORT,
-                   loop=None):
+    def create_tls(cls, hostname, keyfile, certfile, ca_certs,
+                   port=LEAP_PORT, loop=None):
         """Initialize the Smart Bridge using TLS over IPv4."""
         ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLSv1_2)
         ssl_context.load_verify_locations(ca_certs)
@@ -76,7 +76,7 @@ class Smartbridge:
         """
         Return a list of devices for the given domain.
 
-        :param domain: one of 'light', 'switch', 'cover' or 'sensor'
+        :param domain: one of 'light', 'switch', 'cover', 'fan' or 'sensor'
         :returns list of zero or more of the devices
         """
         devs = []
@@ -161,7 +161,8 @@ class Smartbridge:
         :param device_id: device id, e.g. 5
         :returns True if level is greater than 0 level, False otherwise
         """
-        return self.devices[device_id]['current_state'] > 0
+        return (self.devices[device_id]['current_state'] > 0 or
+                self.devices[device_id]['fan_speed'] != "Off")
 
     def set_value(self, device_id, value):
         """
@@ -179,6 +180,25 @@ class Smartbridge:
                     "Command": {
                         "CommandType": "GoToLevel",
                         "Parameter": [{"Type": "Level", "Value": value}]}}}
+            return self._writer.write(cmd)
+
+    def set_fan(self, device_id, value):
+        """
+        Will set the value for a fan device with the given device ID.
+
+        :param device_id: device id to set the value on
+        :param value: string value to set the fan to:
+        Low, Medium, MediumHigh, High
+        """
+        zone_id = self._get_zone_id(device_id)
+        if zone_id:
+            cmd = {
+                "CommuniqueType": "CreateRequest",
+                "Header": {"Url": "/zone/%s/commandprocessor" % zone_id},
+                "Body": {
+                    "Command": {
+                        "CommandType": "GoToFanSpeed",
+                        "FanSpeedParameters": {"FanSpeed": value}}}}
             return self._writer.write(cmd)
 
     def turn_on(self, device_id):
@@ -248,20 +268,34 @@ class Smartbridge:
 
         :param resp_json: full JSON response from the LEAP connection
         """
+        level = 0
+        fan_speed = "Off"
+
         comm_type = resp_json['CommuniqueType']
         if comm_type == 'ReadResponse':
             body_type = resp_json['Header']['MessageBodyType']
             if body_type == 'OneZoneStatus':
                 body = resp_json['Body']
+                zone_stat = body['ZoneStatus']
                 zone = body['ZoneStatus']['Zone']['href']
                 zone = zone[zone.rfind('/') + 1:]
-                level = body['ZoneStatus']['Level']
+                if 'Level' in zone_stat:
+                    level = zone_stat['Level']
+                elif 'FanSpeed' in zone_stat:
+                    fan_speed = zone_stat['FanSpeed']
+                    if fan_speed == "Off":
+                        level = 0
+                    else:
+                        level = 100
+                else:
+                    _LOG.debug("Unknown Lutron Caseta Device Found.")
                 _LOG.debug('zone=%s level=%s', zone, level)
                 for _device_id in self.devices:
                     device = self.devices[_device_id]
                     if 'zone' in device:
                         if zone == device['zone']:
                             device['current_state'] = level
+                            device['fan_speed'] = fan_speed
                             if _device_id in self._subscribers:
                                 self._subscribers[_device_id]()
 
@@ -331,7 +365,8 @@ class Smartbridge:
                                        'zone': device_zone,
                                        'model': device_model,
                                        'serial': device_serial,
-                                       'current_state': -1}
+                                       'current_state': -1,
+                                       'fan_speed': "Off"}
 
     @asyncio.coroutine
     def _load_scenes(self):
